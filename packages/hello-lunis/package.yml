@@ -1,0 +1,23 @@
+name        : hello-lunis
+version     : 1.0
+release     : 1
+source      :
+  - https://github.com/msork/lunis-packages/releases/download/hello-lunis-1.0/hello-lunis-1.0.tar.gz : <SHA256_HERE>
+
+summary     : Simple test package for Lunis
+license     : MIT
+component   : system.base
+description : |
+  A tiny hello-world style package used to test the Lunis solbuild/ypkg pipeline.
+
+builddeps   : []
+rundeps     : []
+
+setup       : |
+  %configure
+
+build       : |
+  %make
+
+install     : |
+  %make_install
