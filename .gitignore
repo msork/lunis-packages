@@ -1,0 +1,33 @@
+# no archives
+*.eopkg
+*.tar.*
+*.tgz
+*.gz
+*.lz
+*.img
+# no ferryd transit manifests
+*.tram
+# no backup files
+*~
+*.vscode
+*.vstags
+*.idea
+**.kate-swp
+# Go binaries
+common/Go/yabi/yabi
+common/Go/ypkg/ypkg-tools
+common/switch_repo_domains
+
+# Python caches
+.mypy_cache
+venv
+
+# infrastructure tooling symlink or clone
+infrastructure-tooling
+
+# solus image symlink or clone
+solus-image-*
+
+# Temporary files that could be left behind for firefox/thunderbird langpacks update script.
+packages/f/firefox-langpacks/tmp_lang_pack
+packages/t/thunderbird-langpacks/tmp_lang_pack
