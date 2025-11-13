@@ -2,7 +2,7 @@ name        : hello-lunis
 version     : 1.0
 release     : 1
 source      :
-  - https://github.com/msork/lunis-packages/releases/download/hello-lunis-1.0/hello-lunis-1.0.tar.gz : <SHA256_HERE>
+  - https://github.com/msork/lunis-packages/releases/download/hello-lunis-1.0/hello-lunis-1.0.tar.gz : 6469748edb91bb80ce78c16ee2f37d837efde6c0a493a5333356e166f54fe8c1
 
 summary     : Simple test package for Lunis
 license     : MIT
