@@ -1,0 +1,340 @@
+version : '3'
+
+set: [pipefail]
+
+vars:
+  SPECFILE:
+    sh: if [ -f "{{ .USER_WORKING_DIR }}/package.yml" ]; then echo "package.yml"; else echo "pspec.xml"; fi;
+  PSPECFILE:
+    sh: if [ -f "{{ .USER_WORKING_DIR }}/package.yml" ]; then echo "pspec_x86_64.xml"; else echo "pspec.xml"; fi;
+
+includes:
+  qt5:
+    taskfile: ./common/Tasks/Taskfile.qt5.yml
+  # Lunis: infra repo can be added later
+  # infra:
+  #   dir: ../lunis-infrastructure
+  #   taskfile: ../lunis-infrastructure/Infra.yml
+  #   optional: true
+
+tasks:
+  # Just a quick help message. Easier for people used to "make help".
+  help:
+    desc: Show how to list available tasks
+    silent: true
+    cmds:
+      - echo "Use 'go-task -l/--list' to list available tasks."
+
+  # Make sure the user is actually inside a package folder.
+  package-file:
+    internal: true
+    desc: >-
+      Check that either `package.yml` or `pspec.xml` exists here in the current directory.
+    dir: '{{ .USER_WORKING_DIR }}'
+    requires:
+      vars: [SPECFILE]
+    preconditions:
+      - sh: test -f package.yml || test -f pspec.xml
+        msg: You need either package.yml or pspec.xml in the current directory.
+
+  solbuild-reset:
+    desc: >-
+      Reset all solbuild images + cache and pull fresh versions.
+    cmds:
+      - sudo solbuild delete-cache --all --images
+      - sudo solbuild init --update --profile unstable-x86_64
+      - sudo solbuild init --update --profile main-x86_64
+
+  # Build the current package using the unstable profile (Lunis default).
+  build:
+    desc: Build the current package against Lunis unstable.
+    aliases: [default]
+    dir: '{{ .USER_WORKING_DIR }}'
+    vars:
+      PROFILE: '{{ default "unstable-x86_64" .PROFILE }}'
+    deps:
+      - package-file
+    cmds:
+      - sudo solbuild build {{ .SPECFILE }} -p {{ .PROFILE }} {{ .CLI_ARGS }}
+
+  # Build using local repo + unstable. Useful if doing rapid iteration.
+  build-local:
+    desc: Build using unstable + local repo (for quick dev loops).
+    aliases: [local]
+    cmds:
+      - task: build-localindex
+      - task: build
+        vars:
+          PROFILE: 'local-unstable-x86_64'
+
+  # Same as above but auto-copies .eopkg files into local repo.
+  build-localcp:
+    desc: Build + force copy .eopkgs into local repo.
+    aliases: [localcp]
+    cmds:
+      - task: build-local
+      - sudo cp -fv {{ .USER_WORKING_DIR }}/*.eopkg /var/lib/solbuild/local/
+      - task: build-localindex
+
+  # Rebuild local repo index so solbuild/eopkg actually sees local packages.
+  build-localindex:
+    desc: Rebuild local repo index if it exists.
+    aliases: [localindex]
+    cmds:
+      - |
+        [[ -d /var/lib/solbuild/local ]] && \
+        sudo eopkg.bin index --skip-signing /var/lib/solbuild/local/ --output /var/lib/solbuild/local/eopkg-index.xml && \
+        sudo eopkg.bin ur  # Force eopkg to pick up the new index
+
+  # Build against main-x86_64. Use for testing but don’t publish.
+  build-stable:
+    desc: Build using Lunis main-x86_64 (don’t publish builds from this).
+    aliases: [stable]
+    cmds:
+      - task: build
+        vars:
+          PROFILE: 'main-x86_64'
+      - |
+        echo "=========================================================================="
+        echo "WARNING: This package was built against MAIN. This is for local testing."
+        echo "                                                                          "
+        echo "         Do NOT publish Lunis packages built against MAIN!!!"
+        echo "=========================================================================="
+
+  # Bump release numbers. Uses ybump for package.yml or pbump.py for pspec.
+  bump:
+    desc: Bump package release version.
+    dir: '{{ .USER_WORKING_DIR }}'
+    vars:
+      YBUMP: "ybump"
+      PBUMP: "{{ .TASKFILE_DIR }}/common/Scripts/pbump.py"
+      BUMP_SCRIPT: '{{ eq .SPECFILE "package.yml" | ternary .YBUMP .PBUMP }}'
+    deps:
+      - package-file
+    cmds:
+      - '{{ .BUMP_SCRIPT }} {{ .SPECFILE }}'
+
+  # Convert old pspec.xml packages into modern package.yml format.
+  convert:
+    desc: Convert pspec.xml to package.yml
+    dir: '{{ .USER_WORKING_DIR }}'
+    preconditions:
+      - sh: test -f pspec.xml
+        msg: Need pspec.xml to convert.
+    cmds:
+      - '{{ .TASKFILE_DIR }}/common/Scripts/yconvert.py pspec.xml'
+
+  # Quick update check using Solus ent.
+  updatecheck:
+    desc: Check if upstream updates exist.
+    dir: '{{ .USER_WORKING_DIR }}'
+    cmds:
+      - ent check updates
+
+  # CVE scanning (optional but good to have).
+  cvecheck:
+    desc: Check for CVEs using cve-check-tool.
+    dir: '{{ .USER_WORKING_DIR }}'
+    cmds:
+      - 'cve-check-tool {{ .PSPECFILE }} -M {{ .TASKFILE_DIR }}/common/mapping -o report.html'
+
+  # Build notification hook (placeholder unless Lunis gets CI infra).
+  notify-complete:
+    desc: Send a notification after build completes (for future Lunis CI).
+    dir: '{{ .USER_WORKING_DIR }}'
+    deps:
+      - package-file
+    cmds:
+      - '{{ .TASKFILE_DIR }}/common/Scripts/buildserver-notification.sh'
+
+  # Find which pkgconfig file belongs to which package.
+  pkgconfig:
+    desc: >-
+      Look up which package provides given pkgconfig targets.
+      Example usage: `go-task pkgconfig -- Qt5Core Qt6Core`
+    cmds:
+      - '{{ .TASKFILE_DIR }}/common/Scripts/epcsearch.py {{ .CLI_ARGS }}'
+
+  # Update version + source in package.yml easily.
+  update:
+    desc: >-
+      Update package.yml version + source URL.
+      Example usage: `go-task update -- 7.2 https://www.nano-editor.org/dist/v7/nano-7.2.tar.xz`
+    dir: '{{ .USER_WORKING_DIR }}'
+    preconditions:
+      - sh: test -f package.yml
+        msg: Need package.yml to update.
+    cmds:
+      - 'yupdate {{ .CLI_ARGS }}'
+
+  # Autoupdate using ent (only works on simple packages).
+  autoupdate:
+    desc: Try automatic update using ent output.
+    dir: '{{ .USER_WORKING_DIR }}'
+    vars:
+      ENT_OUTPUT:
+        sh: ent check updates
+      CURRENT_VERSION:
+        sh: "echo '{{.ENT_OUTPUT}}' | tail -n 1 | awk '{split($0, array); print array[2]}'"
+      LATEST_VERSION:
+        sh: "echo '{{.ENT_OUTPUT}}' | tail -n 1 | awk '{split($0, array); print array[3]}'"
+    preconditions:
+      - sh: test -f package.yml
+        msg: Need package.yml for autoupdate.
+      - sh: 'echo "{{.ENT_OUTPUT}}" | grep -q "-"'
+        msg: No updates detected.
+    cmds:
+      - sed -i 's/{{.CURRENT_VERSION}}/{{.LATEST_VERSION}}/g' package.yml
+      - go-task update -- {{.LATEST_VERSION}} $(yq '.source[0] | keys' package.yml | cut -c 3-)
+
+  # PUBLISH / PUSH (placeholder until Lunis gets build infrastructure)
+  publish:
+    desc: Publish package to Lunis build server (FUTURE FEATURE).
+    dir: '{{ .USER_WORKING_DIR }}'
+    preconditions:
+      - sh: test $(git symbolic-ref HEAD 2>/dev/null) = "refs/heads/main"
+        msg: You're not on the main branch.
+    deps:
+      - package-file
+    cmds:
+      - task: run-safety-catches
+      - git push
+      - task: push
+
+  republish:
+    desc: Retry publishing last commit to Lunis build server (FUTURE FEATURE).
+    dir: '{{ .USER_WORKING_DIR }}'
+    preconditions:
+      - sh: test $(git symbolic-ref HEAD 2>/dev/null) = "refs/heads/main"
+        msg: You're not on the main branch.
+    cmds:
+      - task: run-safety-catches
+      - task: push
+
+  # Basic sanity checks before pushing.
+  run-safety-catches:
+    desc: Run pre-publish sanity checks using CI (FUTURE FEATURE).
+    dir: '{{ .USER_WORKING_DIR }}'
+    cmds:
+      - '{{ .TASKFILE_DIR }}/common/Scripts/package-publish-safety-catches.sh'
+
+  # Push operation placeholder — will be real once Lunis has a build server.
+  push:
+    desc: Push package to Lunis build server (FUTURE FEATURE)
+    internal: true
+    dir: '{{ .USER_WORKING_DIR }}'
+    vars:
+      SOURCE:
+        sh: basename '{{ .USER_WORKING_DIR }}'
+      TAG:
+        sh: if [ -f {{ .SPECFILE }} ]; then {{ .TASKFILE_DIR }}/common/Scripts/gettag.py {{ .USER_WORKING_DIR }}/{{ .SPECFILE }}; fi
+      PATH:
+        sh: git rev-parse --show-prefix
+      REF:
+        sh: git rev-list -1 HEAD "{{ .USER_WORKING_DIR }}"
+      PUBLISH_COMMENT: '{{ .PUBLISH_COMMENT | default "" | b64enc }}'
+    cmds:
+      - |
+        echo "Lunis build server push isn't hooked up yet."
+        echo "Package: {{ .SOURCE }}  Tag: {{ .TAG }}  Ref: {{ .REF }}"
+        # Example future command:
+        # ssh build-controller@build.lunis.local build "{{ .SOURCE }}" "{{ .TAG }}" "{{ .PATH }}" "{{ .REF }}" "{{ .PUBLISH_COMMENT }}"
+
+  # Run some sanity checks for packages before using CI
+  check:
+    desc: Run package sanity checks
+    dir: '{{ .USER_WORKING_DIR }}'
+    cmds:
+      - '{{ .TASKFILE_DIR }}/common/CI/package_checks.py --modified --untracked --base origin/main {{.CLI_ARGS}}'
+
+  # Clean local .eopkg files easily.
+  clean:
+    desc: Delete .eopkg files in current folder.
+    dir: '{{ .USER_WORKING_DIR }}'
+    cmds:
+      - rm *.eopkg -fv
+
+  # Local repo cleanup tools (useful if local builds start piling up).
+  clean-local:
+    desc: WARNING - Delete ALL .eopkg files in local solbuild repo: /var/lib/solbuild/local
+    aliases: [rmlocal, rml]
+    cmds:
+      - task: list-local
+      - task: delete-local
+      - task: build-localindex
+
+  delete-local:
+    desc: Prompt before deleting all local repo .eopkg files.
+    dir: '{{ .TASKFILE_DIR }}'
+    prompt: Removes ALL .eopkg files from local solbuild repo?
+    cmds:
+      - sudo rm -f /var/lib/solbuild/local/*.eopkg
+
+  list-local:
+    desc: List all .eopkg files in /var/lib/solbuild/local
+    aliases: [lslocal, lsl]
+    cmds:
+      - ls -AFcghlot /var/lib/solbuild/local/
+
+  # Search + delete .eopkg files across whole repo.
+  clean-all:
+    desc: List ALL .eopkgs in the repo and delete them if approved.
+    aliases: [rmall, rma]
+    cmds:
+      - task: list-all-eopkgs
+      - task: delete-all-eopkgs
+
+  delete-all-eopkgs:
+    desc: Confirm, then delete all .eopkg files in the whole repo.
+    dir: '{{ .TASKFILE_DIR }}'
+    prompt: Delete ALL .eopkg files in the entire repo?
+    cmds:
+      - find $(git rev-parse --show-toplevel) -type f -name '*.eopkg' -delete
+
+  list-all-eopkgs:
+    desc: List all .eopkg files anywhere inside this repo.
+    aliases: [lsall, lsa]
+    dir: '{{ .TASKFILE_DIR }}'
+    cmds:
+      - find $(git rev-parse --show-toplevel) -type f -name '*.eopkg' -print
+
+  # Repo init hooks. Useful later for Lunis-wide git automation.
+  init:
+    desc: Initialize the Lunis packages repo using the repo commit hooks
+    cmds:
+      - ln -sf ../../common/Hooks/pre-commit.py $(git rev-parse --git-path hooks)/pre-commit
+      - ln -sf ../../common/Hooks/prepare-commit-msg.py $(git rev-parse --git-path hooks)/prepare-commit-msg
+      - ln -sf ../../common/Hooks/post-merge.sh $(git rev-parse --git-path hooks)/post-merge
+      - ln -sf ../../common/Hooks/post-rewrite.sh $(git rev-parse --git-path hooks)/post-rewrite
+
+  # Just a shortcut for "git pull --rebase".
+  pull:
+    desc: Pull latest repo changes
+    dir: '{{ .USER_WORKING_DIR }}'
+    preconditions:
+      - git rev-parse --is-inside-work-tree
+    cmds:
+      - git pull --rebase
+
+  # Create a new package using a helper script.
+  new:
+    desc: Create a new package directory using Lunis helper script.
+    dir: '{{ .USER_WORKING_DIR }}'
+    vars:
+      NEWPKG: "{{ .TASKFILE_DIR }}/common/Scripts/new-package.sh"
+    cmds:
+      - '{{ .NEWPKG }} {{.CLI_ARGS}}'
+
+  # Appstream metadata checker (important for desktop apps).
+  check-appstream-progress:
+    desc: Show which packages still need appstream metadata.
+    dir: '{{ .TASKFILE_DIR }}'
+    cmds:
+      - common/Scripts/check_appstream_progress.py packages
+
+  # Generate monitoring.yaml for services (for future Lunis infrastructure).
+  add-monitoring:
+    desc: Add monitoring.yaml skeleton.
+    dir: '{{ .USER_WORKING_DIR }}'
+    cmds:
+      - '{{ .TASKFILE_DIR }}/common/Scripts/generate_monitoring.py'
